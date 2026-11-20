@@ -29,7 +29,10 @@ services:
       RECEIVER_B_HOST: receiver-b
       RECEIVER_B_PORT: "9001"
       DB_PATH: /data/proxy.db            # 目标接收器持久化（重启保留）
-      # UPSTREAM_PORT_COOLDOWN: "30"     # 上游端口冷却，须大于最大回包延迟
+      UPSTREAM_PORT_MIN: "20000"         # 上游本地端口池
+      UPSTREAM_PORT_MAX: "29999"
+      UPSTREAM_PORT_COOLDOWN: "30"       # 上游端口冷却，须大于最大回包延迟
+      OPEN_SEARCH_TIMEOUT: "15"          # 一轮建连搜索端口池的最长耗时（秒）
     ports:
       - "9000:9000/udp"                  # 遥测终端发往这里
       - "8080:8080"                      # 操作网页

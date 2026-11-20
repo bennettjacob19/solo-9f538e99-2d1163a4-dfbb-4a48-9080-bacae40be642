@@ -23,13 +23,16 @@
   .flash.error { background: #c6282833; border: 1px solid #c62828; }
   table { border-collapse: collapse; width: 100%; font-size: .85rem; }
   th, td { border-bottom: 1px solid #8884; padding: 4px 8px; text-align: left;
-           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 300px; }
   th { opacity: .7; }
   .hint { font-size: .8rem; opacity: .7; margin: 6px 0 0; }
-  .result-ok { color: #2e7d32; } .result-err { color: #c62828; }
-  form .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
+  .result-ok { color: #2e7d32; font-weight: 600; }
+  .result-err { color: #c62828; font-weight: 600; }
+  .result-warn { color: #b26a00; font-weight: 600; }
+  form .row, .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
   label { font-size: .85rem; }
   code { background: #8882; padding: 1px 5px; border-radius: 4px; }
+  .mono { font-family: ui-monospace, monospace; font-size: .85rem; }
 </style>
 </head>
 <body>
@@ -58,29 +61,40 @@
 </section>
 
 <section>
-  <h2>发送试传报文</h2>
-  <form method="post" action="{{ url_for('test') }}">
-    <div class="row">
-      <label>报文 <input name="payload" value="PING" size="24"></label>
-      <label>回包延迟(秒) <input name="delay" type="number" min="0" step="0.5" value="0" style="width:70px"></label>
-      <label>等待超时(秒) <input name="wait" type="number" min="1" max="60" value="10" style="width:70px"></label>
-      <label>固定客户端端口 <input name="client_port" type="number" min="1" max="65535" placeholder="留空=随机" style="width:110px"></label>
-      <button type="submit">发送</button>
-    </div>
-    <p class="hint">不填端口时每次试传都用新端口（总是新会话）。填同一端口可观察：空闲 {{ idle_timeout }} 秒内复用旧会话（仍走旧接收器）；超时后同端口重建会话，也收不到旧会话迟到的回包。</p>
-  </form>
-  {% if last_test %}
-  <div class="card" style="margin-top:10px">
-    <div class="label">最近一次试传（{{ last_test.time }}）</div>
-    <div>客户端 <code>{{ last_test.client }}</code> → 实际去向接收器
-      <b>{{ last_test.receiver or "?" }}</b>，报文 <code>{{ last_test.payload }}</code></div>
-    {% if last_test.ok %}
-      <div class="result-ok">收到回包：<code>{{ last_test.reply }}</code>（RTT {{ last_test.rtt }}s）</div>
-    {% else %}
-      <div class="result-err">{{ last_test.error }}</div>
-    {% endif %}
+  <h2>端口池演示：独立进程占用/释放池内端口</h2>
+  <div class="mono" id="pool">端口池 {{ pool_min }}-{{ pool_max }}：加载中…</div>
+  <div style="margin:6px 0">演示进程当前占用：<span class="mono" id="held">（无）</span></div>
+  <div class="row">
+    <label>池内端口 <input id="occ-ports" value="{{ pool_min }}-{{ pool_min + 7 }}" size="22"
+        placeholder="如 {{ pool_min }}-{{ pool_min + 7 }},{{ pool_min + 10 }}"></label>
+    <button type="button" onclick="occupy(false)">占用</button>
+    <button type="button" onclick="occupy(true)">释放</button>
+    <button type="button" onclick="releaseAll()">全部释放</button>
   </div>
-  {% endif %}
+  <div id="occ-result" class="hint"></div>
+  <p class="hint">演示进程是代理在同一网络命名空间（docker 中为同一容器）里启动的<b>独立子进程</b>，
+    真实 bind 所选 UDP 端口。占用连续 8 个端口后再发试传：代理遇到绑定冲突会继续找，
+    绑定后面的空位；把池内端口全部占满再发试传，才会看到“端口池用尽”的建连失败。
+    外部（演示进程）释放端口后，新会话无需重启即可使用。</p>
+</section>
+
+<section>
+  <h2>发送试传（真实 UDP，核对两端端口）</h2>
+  <div class="row">
+    <label>报文 <input id="trial-payload" value="PING" size="18"></label>
+    <label>等待回执(秒) <input id="trial-wait" type="number" min="1" max="60" value="5" style="width:64px"></label>
+    <label>并行条数 <input id="trial-count" type="number" min="1" max="50" value="1" style="width:64px"></label>
+    <button type="button" onclick="sendTrial()">发送试传</button>
+  </div>
+  <p class="hint">试传报文携带试传标识，经完整代理路径（新会话 → 端口池绑定 → 接收器）真实传输；
+    接收器按标识回报实收报文的 UDP 源端口，代理对照本次绑定端口。
+    只有本次回执到达且两端一致才标为<b>通过</b>；建连失败显示原因，
+    等不到本次回执显示<b>未确认</b>，端口不一致报<b>不符</b>。
+    并行试传各用各的回执，已结束试传的回执不再参与核对。</p>
+  <table>
+    <thead><tr><th>时间</th><th>试传 ID</th><th>客户端</th><th>代理绑定端口</th><th>接收器实收端口</th><th>结果</th><th>用时(s)</th></tr></thead>
+    <tbody id="trials"><tr><td colspan="7">（暂无试传）</td></tr></tbody>
+  </table>
 </section>
 
 <section>
@@ -101,10 +115,71 @@
 
 <script>
 function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+
+const TRIAL_STATES = {
+  pending:     { t: '核对中…', c: '' },
+  passed:      { t: '✔ 通过', c: 'result-ok' },
+  mismatch:    { t: '✘ 端口不符', c: 'result-err' },
+  unconfirmed: { t: '未确认（等不到本次回执）', c: 'result-warn' },
+  failed:      { t: '✘ 建连失败', c: 'result-err' },
+};
+
+async function post(url, data) {
+  const body = new URLSearchParams(data);
+  const r = await fetch(url, { method: 'POST', body });
+  return await r.json();
+}
+
+function showOccResult(r) {
+  const el = document.getElementById('occ-result');
+  if (!r.ok) { el.textContent = '操作失败：' + (r.error || ''); return; }
+  const fails = Object.entries(r.results || {}).filter(([k, v]) => !String(v).startsWith('ok'));
+  el.textContent = fails.length
+    ? '部分端口未成功：' + fails.map(([p, msg]) => p + '（' + msg + '）').join('，')
+    : '操作成功';
+}
+
+async function occupy(release) {
+  const spec = document.getElementById('occ-ports').value;
+  showOccResult(await post(release ? '/api/release' : '/api/occupy', { ports: spec }));
+  refresh();
+}
+
+async function releaseAll() {
+  showOccResult(await post('/api/release', { all: '1' }));
+  refresh();
+}
+
+async function sendTrial() {
+  await post('/api/trial', {
+    payload: document.getElementById('trial-payload').value || 'PING',
+    wait: document.getElementById('trial-wait').value || '5',
+    count: document.getElementById('trial-count').value || '1',
+  });
+  refresh();
+}
+
+function trialRow(t) {
+  const st = TRIAL_STATES[t.state] || { t: t.state, c: '' };
+  let res = `<span class="${st.c}">${esc(st.t)}</span>`;
+  if (t.state === 'failed' && t.error) res += ` <span class="hint">${esc(t.error)}</span>`;
+  return `<tr><td>${esc(t.time)}</td><td><code>${esc(t.id.slice(0, 8))}</code></td>` +
+    `<td>${esc(t.client)}</td><td>${t.bound_port ?? ''}</td><td>${t.seen_port ?? ''}</td>` +
+    `<td>${res}</td><td>${t.elapsed}</td></tr>`;
+}
+
 async function refresh() {
   try {
     const s = await (await fetch('/api/state')).json();
     document.getElementById('target').textContent = s.target;
+    const p = s.pool;
+    document.getElementById('pool').textContent =
+      `端口池 ${p.min}-${p.max}（共 ${p.total}）：会话占用 ${p.in_use} · 冷却中 ${p.cooling} · 建连预留 ${p.reserved}`;
+    document.getElementById('held').textContent =
+      s.held_ports.length ? s.held_ports.join(', ') : '（无）';
+    const ts = s.trials.map(trialRow);
+    document.getElementById('trials').innerHTML =
+      ts.join('') || '<tr><td colspan="7">（暂无试传）</td></tr>';
     const ss = s.sessions.map(x =>
       `<tr><td>${x.id}</td><td>${esc(x.client)}</td><td><b>${esc(x.receiver)}</b></td>` +
       `<td>${x.upstream_port ?? ''}</td><td>${esc(x.state)}</td><td>${x.idle}</td><td>${x.age}</td></tr>`);
